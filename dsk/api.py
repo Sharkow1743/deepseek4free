@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import time
 
+
 ThinkingMode = Literal['detailed', 'simple', 'disabled']
 SearchMode = Literal['enabled', 'disabled']
 
@@ -267,17 +268,41 @@ class DeepSeekAPI:
         try:
             if chunk.startswith(b'data: '):
                 data = json.loads(chunk[6:])
-
-                if 'choices' in data and data['choices']:
+                
+                # Новый формат: {'v': 'текст'}
+                if 'v' in data and isinstance(data['v'], str):
+                    return {
+                        'content': data['v'],
+                        'type': 'text',
+                        'finish_reason': None
+                    }
+                
+                # Старый формат: {'choices': [...]}  
+                elif 'choices' in data and data['choices']:
                     choice = data['choices'][0]
                     if 'delta' in choice:
                         delta = choice['delta']
-
                         return {
                             'content': delta.get('content', ''),
                             'type': delta.get('type', ''),
                             'finish_reason': choice.get('finish_reason')
                         }
+                        
+                # Формат с параметрами ответа
+                elif 'p' in data and 'v' in data:
+                    if data['p'] == 'response/content' and data['o'] == 'APPEND':
+                        return {
+                            'content': data['v'],
+                            'type': 'text',
+                            'finish_reason': None
+                        }
+                    elif data['p'] == 'response/thinking' and data['o'] == 'APPEND':
+                        return {
+                            'content': data['v'],
+                            'type': 'thinking',
+                            'finish_reason': None
+                        }
+                        
         except json.JSONDecodeError:
             raise APIError("Invalid JSON in response chunk")
         except Exception as e:
