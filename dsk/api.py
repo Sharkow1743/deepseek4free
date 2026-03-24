@@ -181,6 +181,18 @@ class DeepSeekAPI:
             return response['data']['biz_data']['id']
         except KeyError:
             raise APIError("Invalid session creation response format from server")
+    def delete_chat_session(self, chat_session_id: str) -> None:
+        """Delete currect chat session"""
+        try:
+            self._make_request(
+                'POST',
+                '/chat_session/delete',
+                {'chat_session_id': chat_session_id}
+            )
+            return f"Successfully deleted session: {chat_session_id}"
+        except KeyError:
+            raise APIError("Invalid session delete response format from server")
+        
 
     def chat_completion(self,
                     chat_session_id: str,
