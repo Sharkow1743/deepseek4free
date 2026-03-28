@@ -386,33 +386,48 @@ class DeepSeekAPI:
 
             # Track if we received finish event
             finished = False
-            
+            # Track message_id from the response
+            current_message_id = None
+            # Track if we've seen the first data chunk (for message_id extraction)
+            first_data_seen = False
+
             for chunk in response.iter_lines():
                 try:
                     # Check for finish event
                     if chunk.startswith(b'event: finish'):
                         finished = True
                         continue
-                    
+
                     parsed = self._parse_chunk(chunk)
                     if parsed:
+                        # Extract message_id from any chunk that contains it
+                        if current_message_id is None:
+                            if 'response_message_id' in parsed:
+                                current_message_id = parsed['response_message_id']
+                            elif 'message_id' in parsed:
+                                current_message_id = parsed['message_id']
+                        
+                        # Add message_id to all content chunks
+                        if current_message_id and parsed.get('type') in ('text', 'thinking'):
+                            parsed['message_id'] = current_message_id
+                        
                         yield parsed
                 except Exception as e:
                     raise APIError(f"Error parsing response chunk: {str(e)}")
-            
+
             # Exit loop after finish event
             if finished:
                 return
 
         except requests.exceptions.RequestException as e:
             raise NetworkError(f"Network error occurred during streaming: {str(e)}")
-        
-    
+
+
 
     def _parse_chunk(self, chunk: bytes) -> Optional[Dict[str, Any]]:
         """
         Parse a SSE chunk from the API response.
-        
+
         DeepSeek uses Server-Sent Events (SSE) with different event types:
         - event: ready - Initial event with message IDs
         - event: update_session - Session metadata updates
@@ -427,54 +442,80 @@ class DeepSeekAPI:
             return None
 
         try:
-            # Skip event lines (they start with 'event:')
+            # Handle event lines (they start with 'event:')
             if chunk.startswith(b'event:'):
                 return None
-            
+
             # Parse data lines
             if chunk.startswith(b'data: '):
                 data = json.loads(chunk[6:])
+
+                # Check for response_message_id from ready event
+                # Format: data: {"request_message_id":1,"response_message_id":2}
+                response_message_id = data.get('response_message_id')
                 
+                # If this is just a message_id announcement (no content), return it anyway
+                if response_message_id is not None and 'p' not in data and 'v' not in data:
+                    return {'response_message_id': response_message_id, 'type': 'meta'}
+
+                # Check for message_id in the data
+                message_id = data.get('message_id')
+
                 # New format: patch operations with path, operation, value
                 if 'p' in data and 'o' in data and 'v' in data:
                     path = data['p']
                     operation = data['o']
                     value = data['v']
-                    
+
                     # Handle content updates (path like "response/content")
                     if path == 'response/content' and operation == 'APPEND':
                         content = str(value) if value is not None else ''
                         # Skip empty content chunks
                         if not content:
                             return None
-                        return {
+                        result = {
                             'content': content,
                             'type': 'text',
                             'finish_reason': None
                         }
-                    
+                        if message_id:
+                            result['message_id'] = message_id
+                        if response_message_id:
+                            result['response_message_id'] = response_message_id
+                        return result
+
                     # Handle thinking content if available
                     if path == 'response/thinking' and operation == 'APPEND':
                         content = str(value) if value is not None else ''
                         if not content:
                             return None
-                        return {
+                        result = {
                             'content': content,
                             'type': 'thinking',
                             'finish_reason': None
                         }
-                
+                        if message_id:
+                            result['message_id'] = message_id
+                        if response_message_id:
+                            result['response_message_id'] = response_message_id
+                        return result
+
                 # Continuation format: just {"v": "..."} - continues previous path
                 # This happens after initial {"p": "...", "o": "...", "v": "..."} sets the path
                 elif 'v' in data and len(data) == 1:
                     value = data['v']
                     if isinstance(value, str) and value:
-                        return {
+                        result = {
                             'content': value,
                             'type': 'text',
                             'finish_reason': None
                         }
-                
+                        if message_id:
+                            result['message_id'] = message_id
+                        if response_message_id:
+                            result['response_message_id'] = response_message_id
+                        return result
+
                 # Old format: choices/delta (keep for backward compatibility)
                 if 'choices' in data and data['choices']:
                     choice = data['choices'][0]
@@ -489,18 +530,24 @@ class DeepSeekAPI:
                             'finish_reason': choice.get('finish_reason')
                         }
                 
-                # Handle nested response format
+                # Handle nested response format (contains message_id)
+                # Format: data: {"v":{"response":{"message_id":2,...}}}
                 if 'v' in data and isinstance(data['v'], dict):
                     response_data = data['v'].get('response', {})
+                    nested_message_id = response_data.get('message_id')
+                    
                     if 'content' in response_data:
                         content = response_data['content']
                         if not content:
                             return None
-                        return {
+                        result = {
                             'content': content,
                             'type': 'text',
                             'finish_reason': None
                         }
+                        if nested_message_id:
+                            result['message_id'] = nested_message_id
+                        return result
                         
         except json.JSONDecodeError:
             # Skip invalid JSON chunks
